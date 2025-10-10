@@ -3,3 +3,5 @@ google-auth
 google-auth-httplib2
 yfinance
 requests
+python-docx
+docx2pdf
