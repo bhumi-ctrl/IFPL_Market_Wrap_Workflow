@@ -1,0 +1,37 @@
+name: CI/CD - Market Wrap
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: n8n-tutorial-474212
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          export_default_credentials: true
+
+      - name: Build Docker image
+        run: |
+          docker build -t asia-south1-docker.pkg.dev/n8n-tutorial-474212/indian-wrap-repo/indian-wrap:latest .
+
+      - name: Push to Artifact Registry
+        run: |
+          docker push asia-south1-docker.pkg.dev/n8n-tutorial-474212/indian-wrap-repo/indian-wrap:latest
+
+      - name: Deploy Cloud Run Job
+        run: |
+          gcloud run jobs deploy indian-wrap-job \
+            --image asia-south1-docker.pkg.dev/n8n-tutorial-474212/indian-wrap-repo/indian-wrap:latest \
+            --region asia-south1 \
+            --service-account wrap-runner@n8n-tutorial-474212.iam.gserviceaccount.com \
+            --set-env-vars GOOGLE_DOC_TEMPLATE_ID=${{ secrets.GOOGLE_DOC_TEMPLATE_ID }},SMTP_SERVER=smtp.gmail.com,SMTP_PORT=587 \
+            --update-secrets SENDER_EMAIL=SENDER_EMAIL:latest,SENDER_PASSWORD=SENDER_PASSWORD:latest,RECIPIENT_EMAILS=RECIPIENT_EMAILS:latest
