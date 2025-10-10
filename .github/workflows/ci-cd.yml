@@ -1,4 +1,4 @@
-name: CI/CD - Market Wrap
+name: CI/CD - Indian Market Wrap
 
 on:
   push:
@@ -8,10 +8,13 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout code
+      # 1️⃣ Checkout the repo
+      - name: Checkout repository
         uses: actions/checkout@v3
 
+      # 2️⃣ Authenticate with Google Cloud using Service Account
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
         with:
@@ -19,14 +22,22 @@ jobs:
           service_account_key: ${{ secrets.GCP_SA_KEY }}
           export_default_credentials: true
 
+      # 3️⃣ Configure Docker for Artifact Registry
+      - name: Configure Docker
+        run: |
+          gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
+
+      # 4️⃣ Build Docker image
       - name: Build Docker image
         run: |
           docker build -t asia-south1-docker.pkg.dev/n8n-tutorial-474212/indian-wrap-repo/indian-wrap:latest .
 
-      - name: Push to Artifact Registry
+      # 5️⃣ Push Docker image to Artifact Registry
+      - name: Push Docker image
         run: |
           docker push asia-south1-docker.pkg.dev/n8n-tutorial-474212/indian-wrap-repo/indian-wrap:latest
 
+      # 6️⃣ Deploy Cloud Run Job
       - name: Deploy Cloud Run Job
         run: |
           gcloud run jobs deploy indian-wrap-job \
