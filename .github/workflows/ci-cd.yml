@@ -12,27 +12,34 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Set up gcloud
+    # ✅ Authenticate to Google Cloud using your GCP_SA_KEY secret
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+    # ✅ Install and configure gcloud
+    - name: Set up gcloud CLI
       uses: google-github-actions/setup-gcloud@v2
       with:
         project_id: n8n-tutorial-474212
-        service_account_key: ${{ secrets.GCP_SA_KEY }}
-        export_default_credentials: true
 
+    # ✅ Configure Docker to use Artifact Registry authentication
     - name: Configure Docker for Artifact Registry
       run: gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
 
+    # ✅ Build Docker image
     - name: Build Docker image
       run: docker build -t asia-south1-docker.pkg.dev/n8n-tutorial-474212/indian-wrap-repo/indian-wrap:latest .
 
+    # ✅ Push Docker image
     - name: Push Docker image
       run: docker push asia-south1-docker.pkg.dev/n8n-tutorial-474212/indian-wrap-repo/indian-wrap:latest
 
+    # ✅ (Optional) Deploy as Cloud Run Job
     - name: Deploy Cloud Run Job
       run: |
         gcloud run jobs deploy indian-wrap-job \
           --image asia-south1-docker.pkg.dev/n8n-tutorial-474212/indian-wrap-repo/indian-wrap:latest \
           --region asia-south1 \
-          --service-account wrap-runner@n8n-tutorial-474212.iam.gserviceaccount.com \
-          --set-env-vars GOOGLE_DOC_TEMPLATE_ID=1vmV5zKKrdgQe58wOXCLtq3fpuYd8gxBC,SMTP_SERVER=smtp.gmail.com,SMTP_PORT=587 \
-          --update-secrets SENDER_EMAIL=SENDER_EMAIL:latest,SENDER_PASSWORD=SENDER_PASSWORD:latest,RECIPIENT_EMAILS=RECIPIENT_EMAILS:latest
+          --service-account wrap-runner@n8n-tutorial-474212.iam.gserviceaccount.com
