@@ -27,7 +27,7 @@ except Exception:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 # ------------------- CONFIG -------------------
-RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", "recipient@example.com")
+RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", "bhumivedant.bv@gmail.com")
 TEMPLATE_FILE = os.environ.get("TEMPLATE_FILE", "template.docx")
 OUTPUT_FILE = os.environ.get("OUTPUT_FILE", "Market_Report.docx")
 
