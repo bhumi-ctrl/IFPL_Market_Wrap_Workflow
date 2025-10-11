@@ -79,10 +79,13 @@ def create_session():
     session = requests.Session()
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept': '*/*',
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
+        'DNT': '1',
+        'Pragma': 'no-cache',
+        'Cache-Control': 'no-cache'
     })
     return session
 
@@ -95,15 +98,38 @@ def fetch_nse_indices():
     try:
         session = create_session()
         
-        # First hit the homepage to get cookies
-        session.get('https://www.nseindia.com', timeout=10)
-        time.sleep(1)
+        # First hit the homepage to get cookies - CRITICAL for NSE
+        logging.info("Getting NSE cookies...")
+        home_response = session.get('https://www.nseindia.com', timeout=10)
+        
+        if home_response.status_code != 200:
+            logging.warning(f"NSE homepage returned {home_response.status_code}")
+        
+        # Wait for cookies to be set
+        time.sleep(2)
+        
+        # Add referer for API call
+        session.headers.update({
+            'Referer': 'https://www.nseindia.com/',
+            'X-Requested-With': 'XMLHttpRequest'
+        })
         
         # Now fetch the indices data
         url = 'https://www.nseindia.com/api/allIndices'
+        logging.info(f"Fetching from: {url}")
         response = session.get(url, timeout=15)
         
+        logging.info(f"Response status: {response.status_code}")
+        logging.info(f"Response headers: {dict(response.headers)}")
+        
         if response.status_code == 200:
+            # Check if response is JSON
+            content_type = response.headers.get('Content-Type', '')
+            if 'application/json' not in content_type:
+                logging.error(f"NSE returned non-JSON content: {content_type}")
+                logging.error(f"Response text (first 500 chars): {response.text[:500]}")
+                raise Exception("NSE API returned HTML instead of JSON")
+            
             indices_json = response.json()
             
             for index in indices_json.get('data', []):
@@ -123,14 +149,79 @@ def fetch_nse_indices():
                     data['BANK_NIFTY_52W_HIGH'] = round(float(index.get('yearHigh', 0)), 2)
                     data['BANK_NIFTY_52W_LOW'] = round(float(index.get('yearLow', 0)), 2)
             
-            logging.info(f"✅ Fetched NSE indices: Nifty={data.get('NIFTY_CLOSING')}, Bank Nifty={data.get('BANK_NIFTY_CLOSING')}")
+            if data:
+                logging.info(f"✅ Fetched NSE indices: Nifty={data.get('NIFTY_CLOSING')}, Bank Nifty={data.get('BANK_NIFTY_CLOSING')}")
+            else:
+                logging.warning("NSE API returned data but no Nifty/Bank Nifty found")
+        else:
+            logging.error(f"NSE API returned status {response.status_code}")
+            logging.error(f"Response: {response.text[:500]}")
             
+    except json.JSONDecodeError as e:
+        logging.error(f"❌ NSE JSON decode error: {e}")
+        logging.error(f"Response content (first 1000 chars): {response.text[:1000] if 'response' in locals() else 'No response'}")
     except Exception as e:
         logging.error(f"❌ NSE indices fetch failed: {e}")
     
     return data
 
-def fetch_bse_sensex():
+def fetch_nse_indices_yahoo_fallback():
+    """
+    Fallback: Fetch NSE indices from Yahoo Finance (no API key needed)
+    ✅ FREE - No API key needed
+    """
+    data = {}
+    try:
+        logging.info("Trying Yahoo Finance fallback...")
+        
+        # Yahoo Finance endpoints
+        indices = {
+            'NIFTY 50': '^NSEI',
+            'BANK NIFTY': '^NSEBANK'
+        }
+        
+        for idx_name, symbol in indices.items():
+            url = f'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d'
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            
+            response = requests.get(url, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                yf_data = response.json()
+                result = yf_data.get('chart', {}).get('result', [{}])[0]
+                meta = result.get('meta', {})
+                quote = result.get('indicators', {}).get('quote', [{}])[0]
+                
+                current_price = meta.get('regularMarketPrice', 0)
+                prev_close = meta.get('previousClose', current_price)
+                change = current_price - prev_close
+                change_pct = (change / prev_close * 100) if prev_close else 0
+                
+                fifty_two_week_high = meta.get('fiftyTwoWeekHigh', 0)
+                fifty_two_week_low = meta.get('fiftyTwoWeekLow', 0)
+                
+                if idx_name == 'NIFTY 50':
+                    data['NIFTY_CLOSING'] = round(current_price, 2)
+                    data['NIFTY_CHANGE_POINTS'] = round(change, 2)
+                    data['NIFTY_CHANGE_PERCENT'] = round(change_pct, 2)
+                    data['NIFTY_52W_HIGH'] = round(fifty_two_week_high, 2)
+                    data['NIFTY_52W_LOW'] = round(fifty_two_week_low, 2)
+                elif idx_name == 'BANK NIFTY':
+                    data['BANK_NIFTY_CLOSING'] = round(current_price, 2)
+                    data['BANK_NIFTY_CHANGE_POINTS'] = round(change, 2)
+                    data['BANK_NIFTY_CHANGE_PERCENT'] = round(change_pct, 2)
+                    data['BANK_NIFTY_52W_HIGH'] = round(fifty_two_week_high, 2)
+                    data['BANK_NIFTY_52W_LOW'] = round(fifty_two_week_low, 2)
+                
+                time.sleep(0.5)
+        
+        if data:
+            logging.info(f"✅ Fetched from Yahoo Finance: Nifty={data.get('NIFTY_CLOSING')}, Bank Nifty={data.get('BANK_NIFTY_CLOSING')}")
+        
+    except Exception as e:
+        logging.error(f"❌ Yahoo Finance fallback failed: {e}")
+    
+    return data
     """
     Fetch BSE Sensex data using public BSE API.
     ✅ FREE - No API key needed
