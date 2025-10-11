@@ -1,15 +1,18 @@
-# Use official Python image
+# Use Python 3.11
 FROM python:3.11-slim
 
 # Set working directory
 WORKDIR /app
 
-# Copy code and requirements
-COPY main.py requirements.txt template.docx /app/
+# Copy all files into container
+COPY . /app
 
 # Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
-RUN apt-get update && apt-get install -y wkhtmltopdf
 
-# Set entrypoint
+# Set environment variables (optional defaults)
+ENV SMTP_SERVER=smtp.gmail.com
+ENV SMTP_PORT=587
+
+# Command to run the Python script
 CMD ["python", "main.py"]
