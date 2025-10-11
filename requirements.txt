@@ -4,4 +4,6 @@ google-cloud-secret-manager==2.18.0
 tenacity==8.2.3
 google-genai==1.43.0
 jsonschema==4.25.1
-beautifulsoup4>=4.12.0
+nsetools==1.0.11
+yfinance==0.2.43
+beautifulsoup4==4.12.3
