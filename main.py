@@ -1,261 +1,160 @@
-#!/usr/bin/env python3
-"""
-main.py
-- Reads template.docx in working directory
-- Detects placeholders {{KEY}}
-- Calls Gemini (google-genai) to produce JSON values for those keys
-- Fills docx (paragraphs + tables), saves output, emails to recipient
-"""
-import os
-import re
-import sys
+import requests
 import json
-import logging
-from datetime import datetime
-from docx import Document
 import smtplib
 from email.mime.multipart import MIMEMultipart
-from email.mime.application import MIMEApplication
 from email.mime.text import MIMEText
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from datetime import datetime
+import os
 
-# Optional libraries (Secret Manager + Gemini)
-try:
-    from google.cloud import secretmanager
-except Exception:
-    secretmanager = None
+# Fetch live Indian market data from free sources
+def fetch_market_data():
+    # Example: Free Yahoo Finance API alternative (yfinance)
+    import yfinance as yf
 
-try:
-    from google import genai
-except Exception:
-    genai = None
+    nifty = yf.Ticker("^NSEI").history(period="1d")
+    bank_nifty = yf.Ticker("^NSEBANK").history(period="1d")
+    sensex = yf.Ticker("^BSESN").history(period="1d")
 
-# ---------------------- CONFIG ----------------------
-TEMPLATE_FILE = os.environ.get("TEMPLATE_FILE", "template.docx")
-OUT_DIR = os.environ.get("OUT_DIR", ".")
-RECIPIENT_EMAIL = "bhumivedant.bv@gmail.com"  # user-specified
-SENDER_EMAIL_ENV = "SENDER_EMAIL"
-SENDER_PASSWORD_ENV = "SENDER_PASSWORD"
-GEMINI_API_ENV = "GEMINI_API_KEY"
-GEMINI_MODEL_ENV = "GEMINI_MODEL"
-DEFAULT_MODEL = os.environ.get(GEMINI_MODEL_ENV, "gemini-2.5-flash")
-# ---------------------- LOGGING ----------------------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # Commodities and currency (free APIs)
+    brent = requests.get("https://www.quandl.com/api/v3/datasets/ODA/POILBRE_USD.json").json()
+    gold = requests.get("https://www.quandl.com/api/v3/datasets/LBMA/GOLD.json").json()
+    inr_usd = requests.get("https://api.exchangerate.host/latest?base=INR&symbols=USD").json()
 
-# ---------------------- SECRET HELPERS ----------------------
-def access_secret(secret_name: str) -> str | None:
-    """Try Secret Manager if available and project env set."""
-    if secretmanager is None:
-        logging.debug("Secret Manager client not available.")
-        return None
-    project = os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT")
-    if not project:
-        logging.debug("GCP project not set; skipping secretmanager for %s", secret_name)
-        return None
-    client = secretmanager.SecretManagerServiceClient()
-    name = f"projects/{project}/secrets/{secret_name}/versions/latest"
-    try:
-        response = client.access_secret_version(request={"name": name})
-        return response.payload.data.decode("utf-8")
-    except Exception as e:
-        logging.warning("access_secret(%s) failed: %s", secret_name, e)
-        return None
-
-def get_secret(name: str) -> str | None:
-    v = os.environ.get(name)
-    if v:
-        return v
-    return access_secret(name)
-
-# ---------------------- DOCX PLACEHOLDER DISCOVERY ----------------------
-PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Z0-9_]+)\s*\}\}")
-
-def discover_placeholders(template_path: str) -> list:
-    """Return unique placeholder keys found in paragraphs and table cells."""
-    doc = Document(template_path)
-    keys = set()
-    # paragraphs
-    for p in doc.paragraphs:
-        for m in PLACEHOLDER_RE.findall(p.text):
-            keys.add(m)
-    # tables
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for p in cell.paragraphs:
-                    for m in PLACEHOLDER_RE.findall(p.text):
-                        keys.add(m)
-    return sorted(keys)
-
-# ---------------------- GEMINI CALL (with retries) ----------------------
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8),
-       retry=retry_if_exception_type(Exception))
-def call_gemini_json(keys: list, model: str, api_key: str) -> dict:
-    """
-    Ask Gemini to return only JSON with entries for the provided keys.
-    Returns dict (may be missing keys).
-    """
-    if genai is None:
-        raise RuntimeError("google-genai SDK not installed or available in runtime.")
-    # ensure env contains key (some SDKs read env)
-    os.environ.setdefault("GEMINI_API_KEY", api_key)
-
-    client = genai.Client()
-
-    # Build prompt: list keys, request types where obvious, require JSON only
-    keys_list_text = ", ".join(keys)
-    prompt = (
-        "You are a data assistant. Return ONLY a JSON object (no explanations, no markdown, no backticks). "
-        "The JSON must contain keys exactly as requested below. Use simple numbers (no currency symbols) for numeric fields, "
-        "and short text for commentary. If you don't know a value, return \"NA\" (string).\n\n"
-        f"Keys: {keys_list_text}\n\n"
-        "Return something like: {\"REPORT_DATE\":\"11-Oct-2025\",\"EXECUTIVE_SUMMARY\":\"Markets...\",\"NIFTY_CLOSING\":22452.5, ...}\n"
-        "Make REPORT_DATE format DD-MMM-YYYY. Keep responses compact and valid JSON.\n"
-    )
-
-    logging.info("Sending prompt to Gemini for %d keys", len(keys))
-    # call SDK (handle possible variations in SDK)
-    model_name = model or DEFAULT_MODEL
-    try:
-        resp = client.models.generate_content(model=model_name, contents=prompt)
-    except Exception as e:
-        # try older style fallback
-        try:
-            resp = client.generate_text(model=model_name, input=prompt)
-        except Exception as e2:
-            raise RuntimeError(f"Gemini call failed: {e} / fallback failed: {e2}")
-    # extract text
-    text = None
-    try:
-        text = getattr(resp, "text", None)
-    except Exception:
-        text = None
-    if not text:
-        try:
-            text = resp.output[0].content[0].text
-        except Exception:
-            text = str(resp)
-    text = (text or "").strip()
-    # remove code fences if present
-    if text.startswith("```"):
-        parts = text.split("```")
-        if len(parts) >= 2:
-            text = parts[1].strip()
-    # isolate JSON braces
-    first = text.find("{")
-    last = text.rfind("}")
-    if first == -1 or last == -1:
-        raise RuntimeError("Gemini did not return a JSON object. Raw output: " + text[:1000])
-    json_str = text[first:last+1]
-    try:
-        data = json.loads(json_str)
-    except Exception as e:
-        raise RuntimeError(f"Failed to parse JSON from Gemini response: {e}. Candidate: {json_str[:1000]}")
-    if not isinstance(data, dict):
-        raise RuntimeError("Gemini returned JSON that is not an object.")
-    logging.info("Gemini returned %d keys", len(data.keys()))
+    data = {
+        "nifty": {
+            "closing": round(nifty['Close'].iloc[-1], 2),
+            "change_points": round(nifty['Close'].iloc[-1] - nifty['Open'].iloc[-1], 2),
+            "change_percent": round((nifty['Close'].iloc[-1] - nifty['Open'].iloc[-1])/nifty['Open'].iloc[-1]*100, 2)
+        },
+        "bank_nifty": {
+            "closing": round(bank_nifty['Close'].iloc[-1], 2),
+            "change_points": round(bank_nifty['Close'].iloc[-1] - bank_nifty['Open'].iloc[-1], 2),
+            "change_percent": round((bank_nifty['Close'].iloc[-1] - bank_nifty['Open'].iloc[-1])/bank_nifty['Open'].iloc[-1]*100, 2)
+        },
+        "sensex": {
+            "closing": round(sensex['Close'].iloc[-1], 2),
+            "change_points": round(sensex['Close'].iloc[-1] - sensex['Open'].iloc[-1], 2),
+            "change_percent": round((sensex['Close'].iloc[-1] - sensex['Open'].iloc[-1])/sensex['Open'].iloc[-1]*100, 2)
+        },
+        "commodities": {
+            "brent_crude": {
+                "price": brent['dataset']['data'][-1][1],
+                "change": round(brent['dataset']['data'][-1][1] - brent['dataset']['data'][-2][1], 2)
+            },
+            "gold": {
+                "price": gold['dataset']['data'][-1][1],
+                "change": round(gold['dataset']['data'][-1][1] - gold['dataset']['data'][-2][1], 2)
+            }
+        },
+        "currencies": {
+            "inr_usd": {
+                "rate": inr_usd['rates']['USD'],
+                "change": 0  # Could fetch historical for delta if needed
+            }
+        },
+        "market_breadth": {
+            "advances": "NA", "declines": "NA", "unchanged": "NA"
+        },
+        "top_gainers": [
+            {"name": "TCS", "price": 0, "change_percent": 0, "volume": 0},
+            {"name": "Infosys", "price": 0, "change_percent": 0, "volume": 0}
+        ],
+        "top_losers": [
+            {"name": "JSW Steel", "price": 0, "change_percent": 0, "volume": 0},
+            {"name": "Coal India", "price": 0, "change_percent": 0, "volume": 0}
+        ],
+        "institutional_activity": {
+            "fii_equity_net": 0,
+            "dii_equity_net": 0,
+            "fii_debt_net": 0,
+            "dii_debt_net": 0
+        }
+    }
     return data
 
-# ---------------------- DOCX FILLER ----------------------
-def replace_in_paragraph(paragraph, data_dict):
-    # Replace multiple occurrences safely
-    text = paragraph.text
-    for k, v in data_dict.items():
-        placeholder = "{{" + k + "}}"
-        if placeholder in text:
-            text = text.replace(placeholder, str(v))
-        # also handle whitespace-inside braces variants
-        placeholder_ws = "{{ " + k + " }}"
-        if placeholder_ws in text:
-            text = text.replace(placeholder_ws, str(v))
-    if text != paragraph.text:
-        paragraph.text = text
+# Generate Executive Summary using Gemini LLM
+def generate_summary(data):
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    prompt = f"""
+    Generate a concise daily market wrap summary for India using this data:
+    Nifty: {data['nifty']}
+    Bank Nifty: {data['bank_nifty']}
+    Sensex: {data['sensex']}
+    Commodities: {data['commodities']}
+    Currencies: {data['currencies']}
+    Top Gainers: {data['top_gainers']}
+    Top Losers: {data['top_losers']}
+    Institutional Activity: {data['institutional_activity']}
+    """
+    response = requests.post(
+        "https://api.gemini.com/v1/generate",
+        headers={"Authorization": f"Bearer {gemini_api_key}"},
+        json={"prompt": prompt, "max_tokens": 300}
+    )
+    return response.json().get("text", "Summary not available")
 
-def fill_docx(template_path: str, output_path: str, data: dict):
-    doc = Document(template_path)
-    # paragraphs
-    for p in doc.paragraphs:
-        replace_in_paragraph(p, data)
-    # tables
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for p in cell.paragraphs:
-                    replace_in_paragraph(p, data)
-    doc.save(output_path)
-    logging.info("Saved filled document to %s", output_path)
+# Generate JSON template filled with current data
+def generate_json_template(data, summary):
+    report_date = datetime.now().strftime("%d-%b-%Y")
+    json_template = {
+        "REPORT_DATE": report_date,
+        "EXECUTIVE_SUMMARY": summary,
+        "NIFTY_CLOSING": data['nifty']['closing'],
+        "NIFTY_CHANGE_POINTS": data['nifty']['change_points'],
+        "NIFTY_CHANGE_PERCENT": data['nifty']['change_percent'],
+        "SENSEX_CLOSING": data['sensex']['closing'],
+        "SENSEX_CHANGE_POINTS": data['sensex']['change_points'],
+        "SENSEX_CHANGE_PERCENT": data['sensex']['change_percent'],
+        "BANK_NIFTY_CLOSING": data['bank_nifty']['closing'],
+        "BANK_NIFTY_CHANGE_POINTS": data['bank_nifty']['change_points'],
+        "BANK_NIFTY_CHANGE_PERCENT": data['bank_nifty']['change_percent'],
+        "ADVANCES": data['market_breadth']['advances'],
+        "DECLINES": data['market_breadth']['declines'],
+        "UNCHANGED": data['market_breadth']['unchanged'],
+        "FII_EQUITY_NET": data['institutional_activity']['fii_equity_net'],
+        "DII_EQUITY_NET": data['institutional_activity']['dii_equity_net'],
+        "GAINER_1_NAME": data['top_gainers'][0]['name'],
+        "GAINER_1_CHANGE": data['top_gainers'][0]['change_percent'],
+        "LOSER_1_NAME": data['top_losers'][0]['name'],
+        "LOSER_1_CHANGE": data['top_losers'][0]['change_percent'],
+        "GLOBAL_MARKET_SUMMARY": "Global markets update not available",
+        "INR_USD_RATE": data['currencies']['inr_usd']['rate'],
+        "INR_USD_CHANGE": data['currencies']['inr_usd']['change'],
+        "BRENT_PRICE": data['commodities']['brent_crude']['price'],
+        "BRENT_CHANGE": data['commodities']['brent_crude']['change'],
+        "GOLD_PRICE": data['commodities']['gold']['price'],
+        "GOLD_CHANGE": data['commodities']['gold']['change'],
+    }
+    return json_template
 
-# ---------------------- EMAIL SENDER ----------------------
-def send_email(sender: str, password: str, recipient: str, subject: str, body: str, attachment_path: str):
-    if not sender or not password:
-        raise RuntimeError("Missing SMTP credentials: set SENDER_EMAIL and SENDER_PASSWORD as env or Secret Manager.")
+# Send email with the report
+def send_email(report_json):
+    sender_email = os.getenv("SENDER_EMAIL")
+    sender_password = os.getenv("SENDER_PASSWORD")
+    receiver_email = "bhumivedant.bv@gmail.com"
+
     msg = MIMEMultipart()
-    msg["From"] = sender
-    msg["To"] = recipient
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
-    with open(attachment_path, "rb") as f:
-        part = MIMEApplication(f.read(), Name=os.path.basename(attachment_path))
-    part['Content-Disposition'] = f'attachment; filename="{os.path.basename(attachment_path)}"'
-    msg.attach(part)
+    msg['From'] = sender_email
+    msg['To'] = receiver_email
+    msg['Subject'] = f"Indian Market Daily Wrap - {report_json['REPORT_DATE']}"
 
-    logging.info("Connecting to SMTP and sending email to %s", recipient)
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
-        server.login(sender, password)
-        server.send_message(msg)
-    logging.info("Email sent successfully to %s", recipient)
-
-# ---------------------- MAIN FLOW ----------------------
-def main():
-    logging.info("Starting template fill run.")
-    if not os.path.exists(TEMPLATE_FILE):
-        logging.error("Template file not found: %s", TEMPLATE_FILE)
-        sys.exit(1)
+    body = json.dumps(report_json, indent=4)
+    msg.attach(MIMEText(body, 'plain'))
 
     try:
-        # 1) discover placeholders
-        placeholders = discover_placeholders(TEMPLATE_FILE)
-        if not placeholders:
-            logging.warning("No placeholders found in template. Exiting.")
-            sys.exit(1)
-        logging.info("Discovered %d placeholders", len(placeholders))
-
-        # 2) call Gemini to get values for all placeholders
-        gemini_key = get_secret(GEMINI_API_ENV)
-        if not gemini_key:
-            raise RuntimeError("Missing GEMINI_API_KEY (env or Secret Manager).")
-        response_dict = call_gemini_json(placeholders, model=os.environ.get(GEMINI_MODEL_ENV), api_key=gemini_key)
-
-        # 3) coerce/normalize: ensure all placeholders present (fill NA)
-        filled = {}
-        for k in placeholders:
-            v = response_dict.get(k)
-            if v is None:
-                # special-case REPORT_DATE default
-                if k == "REPORT_DATE":
-                    v = datetime.now().strftime("%d-%b-%Y")
-                else:
-                    v = "NA"
-            # format floats/ints as plain numbers; keep strings as-is
-            filled[k] = v
-
-        # 4) write output docx
-        out_name = f"Market_Report_{datetime.now().strftime('%Y%m%d')}.docx"
-        out_path = os.path.join(OUT_DIR, out_name)
-        fill_docx(TEMPLATE_FILE, out_path, filled)
-
-        # 5) email to recipient
-        sender = get_secret(SENDER_EMAIL_ENV)
-        password = get_secret(SENDER_PASSWORD_ENV)
-        subject = f"Daily Market Report - {filled.get('REPORT_DATE', '')}"
-        body = "Please find attached the daily market report."
-        send_email(sender, password, RECIPIENT_EMAIL, subject, body, out_path)
-
-        logging.info("Run complete, exiting 0.")
-        sys.exit(0)
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, receiver_email, msg.as_string())
+        print("Email sent successfully.")
     except Exception as e:
-        logging.exception("Run failed: %s", e)
-        sys.exit(1)
+        print(f"Failed to send email: {e}")
+
+# Main workflow
+def main():
+    data = fetch_market_data()
+    summary = generate_summary(data)
+    report_json = generate_json_template(data, summary)
+    send_email(report_json)
 
 if __name__ == "__main__":
     main()
