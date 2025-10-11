@@ -1,6 +1,5 @@
 yfinance
 requests
 python-docx
-pdfkit
 docx2html
-openai
+pdfkit
