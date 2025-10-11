@@ -10,6 +10,17 @@ import os
 from docx import Document
 from docx2html import convert
 import pdfkit
+from weasyprint import HTML
+
+def fill_template(doc_path, pdf_path, data):
+    doc = Document(doc_path)
+    for para in doc.paragraphs:
+        for key, val in data.items():
+            placeholder = f"{{{{{key}}}}}"
+            para.text = para.text.replace(placeholder, str(val))
+    html_content = convert(doc_path)        # convert DOCX to HTML
+    HTML(string=html_content).write_pdf(pdf_path)
+
 
 # ---------------- CONFIG ----------------
 SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
