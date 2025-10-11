@@ -4,5 +4,3 @@ google-cloud-secret-manager==2.18.0
 tenacity==8.2.3
 google-genai==1.43.0
 jsonschema==4.25.1
-yfinance==0.2.27
-pandas==2.1.1
