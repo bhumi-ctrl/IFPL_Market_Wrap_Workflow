@@ -19,4 +19,4 @@ RUN pip install --upgrade pip && \
 COPY . .
 
 # Default command
-CMD ["python", "market_report.py"]
+CMD ["python", "main.py"]
