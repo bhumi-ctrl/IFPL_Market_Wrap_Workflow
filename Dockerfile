@@ -1,6 +1,5 @@
 FROM python:3.12-slim
 
-# suppress pip root-user warning (optional)
 ENV PIP_ROOT_USER_ACTION=ignore
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
