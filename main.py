@@ -2,12 +2,14 @@ import yfinance as yf
 import requests
 from datetime import datetime
 from docx import Document
-import pdfkit
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 from email.mime.text import MIMEText
 import os
+from docx import Document
+from docx2html import convert
+import pdfkit
 
 # ---------------- CONFIG ----------------
 SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
@@ -127,19 +129,23 @@ def fetch_commentary(all_data):
         ]}
 
 # ---------------- FILL TEMPLATE ----------------
-def fill_template(template_path, output_path, data):
-    doc = Document(template_path)
+def fill_template(doc_path, pdf_path, data):
+    doc = Document(doc_path)
+    # Replace placeholders
     for para in doc.paragraphs:
         for key, val in data.items():
             placeholder = f"{{{{{key}}}}}"
             if placeholder in para.text:
                 para.text = para.text.replace(placeholder, str(val))
-    doc.save(output_path)
+    temp_docx = "/tmp/temp.docx"
+    doc.save(temp_docx)
+    html_content = convert(temp_docx)
+    pdfkit.from_string(html_content, pdf_path)
 
 # ---------------- DOCX TO PDF ----------------
-def convert_to_pdf(docx_path, pdf_path):
-    import pdfkit
-    pdfkit.from_file(docx_path, pdf_path)
+# def convert_to_pdf(docx_path, pdf_path):
+#     html_content = convert(temp_docx)
+#     pdfkit.from_string(html_content, pdf_path)
 
 # ---------------- SEND EMAIL ----------------
 def send_email(pdf_path):
@@ -169,6 +175,6 @@ if __name__ == "__main__":
     all_data.update(fetch_commentary(all_data))
     all_data["REPORT_DATE"] = datetime.now().strftime("%d-%b-%Y")
 
-    fill_template(TEMPLATE_PATH, OUTPUT_DOCX, all_data)
-    convert_to_pdf(OUTPUT_DOCX, OUTPUT_PDF)
+    fill_template(TEMPLATE_PATH, OUTPUT_PDF, all_data)
+    # convert_to_pdf(OUTPUT_DOCX, OUTPUT_PDF)
     send_email(OUTPUT_PDF)
